@@ -355,22 +355,7 @@ func (m *Manager) Update(interval time.Duration, files []string, externalLabels 
 	wg.Add(len(m.groups))
 	for n, oldg := range m.groups {
 		go func(n string, g *Group) {
-			g.markStale = true
-			g.stop()
-			if m := g.metrics; m != nil {
-				m.IterationsMissed.DeleteLabelValues(n)
-				m.IterationsScheduled.DeleteLabelValues(n)
-				m.EvalTotal.DeleteLabelValues(n)
-				m.EvalFailures.DeleteLabelValues(n, "user")
-				m.EvalFailures.DeleteLabelValues(n, "operator")
-				m.GroupInterval.DeleteLabelValues(n)
-				m.GroupLastEvalTime.DeleteLabelValues(n)
-				m.GroupLastDuration.DeleteLabelValues(n)
-				m.GroupRules.DeleteLabelValues(n)
-				m.GroupSamples.DeleteLabelValues(n)
-				m.GroupLastRuleDurationSum.DeleteLabelValues(n)
-				m.GroupLastRestoreDuration.DeleteLabelValues(n)
-			}
+			stopRemovedGroup(n, g, true)
 			wg.Done()
 		}(n, oldg)
 	}
@@ -405,27 +390,32 @@ func (m *Manager) UnloadGroups(keys ...string) {
 		}
 		delete(m.groups, key)
 
-		wg.Add(1)
-		go func() {
-			g.stop()
-			if m := g.metrics; m != nil {
-				m.IterationsMissed.DeleteLabelValues(key)
-				m.IterationsScheduled.DeleteLabelValues(key)
-				m.EvalTotal.DeleteLabelValues(key)
-				m.EvalFailures.DeleteLabelValues(key, "user")
-				m.EvalFailures.DeleteLabelValues(key, "operator")
-				m.GroupInterval.DeleteLabelValues(key)
-				m.GroupLastEvalTime.DeleteLabelValues(key)
-				m.GroupLastDuration.DeleteLabelValues(key)
-				m.GroupRules.DeleteLabelValues(key)
-				m.GroupSamples.DeleteLabelValues(key)
-				m.GroupLastRuleDurationSum.DeleteLabelValues(key)
-				m.GroupLastRestoreDuration.DeleteLabelValues(key)
-			}
-			wg.Done()
-		}()
+		wg.Go(func() {
+			stopRemovedGroup(key, g, false)
+		})
 	}
 	wg.Wait()
+}
+
+// stopRemovedGroup stops a group that leaves the manager and deletes its metrics.
+// The group writes staleness markers for its series when markStale is true.
+func stopRemovedGroup(key string, g *Group, markStale bool) {
+	g.markStale = markStale
+	g.stop()
+	if m := g.metrics; m != nil {
+		m.IterationsMissed.DeleteLabelValues(key)
+		m.IterationsScheduled.DeleteLabelValues(key)
+		m.EvalTotal.DeleteLabelValues(key)
+		m.EvalFailures.DeleteLabelValues(key, "user")
+		m.EvalFailures.DeleteLabelValues(key, "operator")
+		m.GroupInterval.DeleteLabelValues(key)
+		m.GroupLastEvalTime.DeleteLabelValues(key)
+		m.GroupLastDuration.DeleteLabelValues(key)
+		m.GroupRules.DeleteLabelValues(key)
+		m.GroupSamples.DeleteLabelValues(key)
+		m.GroupLastRuleDurationSum.DeleteLabelValues(key)
+		m.GroupLastRestoreDuration.DeleteLabelValues(key)
+	}
 }
 
 // GroupLoader is responsible for loading rule groups from arbitrary sources and parsing them.
