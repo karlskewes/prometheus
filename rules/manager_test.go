@@ -1358,6 +1358,7 @@ func TestMetricsUpdate(t *testing.T) {
 
 	cases := []struct {
 		files   []string
+		unload  bool
 		metrics int
 	}{
 		{
@@ -1376,11 +1377,24 @@ func TestMetricsUpdate(t *testing.T) {
 			files:   files[1:],
 			metrics: 8,
 		},
+		{
+			// Unloading the groups should delete their metrics too.
+			unload:  true,
+			metrics: 0,
+		},
 	}
 
 	for i, c := range cases {
-		err := ruleManager.Update(time.Second, c.files, labels.EmptyLabels(), "", nil)
-		require.NoError(t, err)
+		if c.unload {
+			var keys []string
+			for _, g := range ruleManager.RuleGroups() {
+				keys = append(keys, GroupKey(g.File(), g.Name()))
+			}
+			ruleManager.UnloadGroups(keys...)
+		} else {
+			err := ruleManager.Update(time.Second, c.files, labels.EmptyLabels(), "", nil)
+			require.NoError(t, err)
+		}
 		time.Sleep(2 * time.Second)
 		require.Equal(t, c.metrics, countMetrics(), "test %d: invalid count of metrics", i)
 	}
@@ -1419,8 +1433,17 @@ func TestGroupStalenessOnRemoval(t *testing.T) {
 		}
 	}()
 
+	groupKeys := func() []string {
+		var keys []string
+		for _, g := range ruleManager.RuleGroups() {
+			keys = append(keys, GroupKey(g.File(), g.Name()))
+		}
+		return keys
+	}
+
 	cases := []struct {
 		files    []string
+		unload   bool
 		staleNaN int
 	}{
 		{
@@ -1445,6 +1468,22 @@ func TestGroupStalenessOnRemoval(t *testing.T) {
 			staleNaN: 1,
 		},
 		{
+			files:    files,
+			staleNaN: 0,
+		},
+		{
+			// Unloading the groups hands them off to another evaluator.
+			// So it should not produce staleness markers.
+			unload:   true,
+			staleNaN: 0,
+		},
+		{
+			// The groups are unloaded already.
+			// So removing the files should not produce staleness markers.
+			files:    files[:0],
+			staleNaN: 0,
+		},
+		{
 			// Add rules back so we have rules loaded when we stop the manager
 			// and check for the absence of staleness markers.
 			files:    sameFiles,
@@ -1454,8 +1493,13 @@ func TestGroupStalenessOnRemoval(t *testing.T) {
 
 	var totalStaleNaN int
 	for i, c := range cases {
-		err := ruleManager.Update(time.Second, c.files, labels.EmptyLabels(), "", nil)
-		require.NoError(t, err)
+		if c.unload {
+			ruleManager.UnloadGroups(groupKeys()...)
+			require.Empty(t, ruleManager.RuleGroups(), "test %d: groups left after unload", i)
+		} else {
+			err := ruleManager.Update(time.Second, c.files, labels.EmptyLabels(), "", nil)
+			require.NoError(t, err)
+		}
 		time.Sleep(3 * time.Second)
 		totalStaleNaN += c.staleNaN
 		require.Equal(t, totalStaleNaN, countStaleNaN(t, storage), "test %d/%q: invalid count of staleness markers", i, c.files)
@@ -1463,6 +1507,10 @@ func TestGroupStalenessOnRemoval(t *testing.T) {
 	ruleManager.Stop()
 	stopped = true
 	require.Equal(t, totalStaleNaN, countStaleNaN(t, storage), "invalid count of staleness markers after stopping the engine")
+
+	// Unloading groups from a stopped manager should do nothing.
+	ruleManager.UnloadGroups(groupKeys()...)
+	require.Equal(t, totalStaleNaN, countStaleNaN(t, storage), "invalid count of staleness markers after unloading from a stopped manager")
 }
 
 func TestMetricsStalenessOnManagerShutdown(t *testing.T) {
