@@ -381,6 +381,53 @@ func (m *Manager) Update(interval time.Duration, files []string, externalLabels 
 	return nil
 }
 
+// UnloadGroups stops the rule groups with the given keys and removes them from the manager.
+// Unlike Update, it does not write staleness markers for the series of the groups.
+// Use it when another rule evaluator takes over the groups, so that their series continue.
+// A key is the GroupKey of a group.
+// Unknown keys are ignored.
+// This method will no-op in case the manager is already stopped.
+func (m *Manager) UnloadGroups(keys ...string) {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	select {
+	case <-m.done:
+		return
+	default:
+	}
+
+	var wg sync.WaitGroup
+	for _, key := range keys {
+		g, ok := m.groups[key]
+		if !ok {
+			continue
+		}
+		delete(m.groups, key)
+
+		wg.Add(1)
+		go func() {
+			g.stop()
+			if m := g.metrics; m != nil {
+				m.IterationsMissed.DeleteLabelValues(key)
+				m.IterationsScheduled.DeleteLabelValues(key)
+				m.EvalTotal.DeleteLabelValues(key)
+				m.EvalFailures.DeleteLabelValues(key, "user")
+				m.EvalFailures.DeleteLabelValues(key, "operator")
+				m.GroupInterval.DeleteLabelValues(key)
+				m.GroupLastEvalTime.DeleteLabelValues(key)
+				m.GroupLastDuration.DeleteLabelValues(key)
+				m.GroupRules.DeleteLabelValues(key)
+				m.GroupSamples.DeleteLabelValues(key)
+				m.GroupLastRuleDurationSum.DeleteLabelValues(key)
+				m.GroupLastRestoreDuration.DeleteLabelValues(key)
+			}
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
 // GroupLoader is responsible for loading rule groups from arbitrary sources and parsing them.
 type GroupLoader interface {
 	Load(identifier string, ignoreUnknownFields bool, nameValidationScheme model.ValidationScheme) (*rulefmt.RuleGroups, []error)
