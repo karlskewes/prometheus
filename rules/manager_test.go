@@ -1141,9 +1141,13 @@ func TestMetricsUpdate(t *testing.T) {
 		"prometheus_rule_evaluations_total",
 		"prometheus_rule_evaluation_failures_total",
 		"prometheus_rule_group_interval_seconds",
+		"prometheus_rule_group_iterations_missed_total",
+		"prometheus_rule_group_iterations_total",
 		"prometheus_rule_group_last_duration_seconds",
 		"prometheus_rule_group_last_rule_duration_sum_seconds",
+		"prometheus_rule_group_last_evaluation_samples",
 		"prometheus_rule_group_last_evaluation_timestamp_seconds",
+		"prometheus_rule_group_last_restore_duration_seconds",
 		"prometheus_rule_group_rules",
 	}
 
@@ -1182,30 +1186,54 @@ func TestMetricsUpdate(t *testing.T) {
 	}
 
 	cases := []struct {
-		files   []string
-		metrics int
+		files []string
+		// unload holds the keys to unload instead of an update with files.
+		unload   []string
+		unloaded int
+		metrics  int
 	}{
 		{
 			files:   files,
-			metrics: 14,
+			metrics: 22,
 		},
 		{
 			files:   files[:1],
-			metrics: 7,
+			metrics: 11,
 		},
 		{
 			files:   files[:0],
 			metrics: 0,
 		},
 		{
+			// Only a group that the first Update loads has a restore duration series.
+			// So a group that a later Update loads has one series less.
 			files:   files[1:],
-			metrics: 7,
+			metrics: 10,
+		},
+		{
+			files:   files,
+			metrics: 20,
+		},
+		{
+			// Unloading one group should delete only its metrics.
+			unload:   []string{GroupKey("fixtures/rules.yaml", "test"), "unknown"},
+			unloaded: 1,
+			metrics:  10,
+		},
+		{
+			unload:   []string{GroupKey("fixtures/rules2.yaml", "test_2")},
+			unloaded: 1,
+			metrics:  0,
 		},
 	}
 
 	for i, c := range cases {
-		err := ruleManager.Update(time.Second, c.files, labels.EmptyLabels(), "", nil)
-		require.NoError(t, err)
+		if c.unload != nil {
+			require.Equal(t, c.unloaded, ruleManager.UnloadGroups(c.unload...), "test %d: invalid count of unloaded groups", i)
+		} else {
+			err := ruleManager.Update(time.Second, c.files, labels.EmptyLabels(), "", nil)
+			require.NoError(t, err)
+		}
 		time.Sleep(2 * time.Second)
 		require.Equal(t, c.metrics, countMetrics(), "test %d: invalid count of metrics", i)
 	}
@@ -1246,6 +1274,7 @@ func TestGroupStalenessOnRemoval(t *testing.T) {
 
 	cases := []struct {
 		files    []string
+		unload   bool
 		staleNaN int
 	}{
 		{
@@ -1270,6 +1299,24 @@ func TestGroupStalenessOnRemoval(t *testing.T) {
 			staleNaN: 1,
 		},
 		{
+			// Load the groups again.
+			// The next case unloads them.
+			files:    files,
+			staleNaN: 0,
+		},
+		{
+			// Unloading the groups stands for a hand-off to another evaluator.
+			// So it should not produce staleness markers.
+			unload:   true,
+			staleNaN: 0,
+		},
+		{
+			// The groups are unloaded already.
+			// So removing the files should not produce staleness markers.
+			files:    files[:0],
+			staleNaN: 0,
+		},
+		{
 			// Add rules back so we have rules loaded when we stop the manager
 			// and check for the absence of staleness markers.
 			files:    sameFiles,
@@ -1279,8 +1326,14 @@ func TestGroupStalenessOnRemoval(t *testing.T) {
 
 	var totalStaleNaN int
 	for i, c := range cases {
-		err := ruleManager.Update(time.Second, c.files, labels.EmptyLabels(), "", nil)
-		require.NoError(t, err)
+		if c.unload {
+			keys := groupKeys(ruleManager)
+			require.Equal(t, len(keys), ruleManager.UnloadGroups(keys...), "test %d: invalid count of unloaded groups", i)
+			require.Empty(t, ruleManager.RuleGroups(), "test %d: groups left after unload", i)
+		} else {
+			err := ruleManager.Update(time.Second, c.files, labels.EmptyLabels(), "", nil)
+			require.NoError(t, err)
+		}
 		time.Sleep(3 * time.Second)
 		totalStaleNaN += c.staleNaN
 		require.Equal(t, totalStaleNaN, countStaleNaN(t, storage), "test %d/%q: invalid count of staleness markers", i, c.files)
@@ -1288,6 +1341,20 @@ func TestGroupStalenessOnRemoval(t *testing.T) {
 	ruleManager.Stop()
 	stopped = true
 	require.Equal(t, totalStaleNaN, countStaleNaN(t, storage), "invalid count of staleness markers after stopping the engine")
+
+	// Unloading groups from a stopped manager should do nothing.
+	keys := groupKeys(ruleManager)
+	require.Zero(t, ruleManager.UnloadGroups(keys...))
+	require.Equal(t, keys, groupKeys(ruleManager))
+}
+
+// groupKeys returns the GroupKey of each rule group in the manager.
+func groupKeys(m *Manager) []string {
+	var keys []string
+	for _, g := range m.RuleGroups() {
+		keys = append(keys, GroupKey(g.File(), g.Name()))
+	}
+	return keys
 }
 
 func TestMetricsStalenessOnManagerShutdown(t *testing.T) {
